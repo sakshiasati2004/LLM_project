@@ -3,40 +3,32 @@ import shutil
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel
 
 from backend.db import (
-    register_user,
-    login_user,
-    create_chat_session,
-    get_chat_history,
-    get_user_sessions,
-    rename_session,
-    delete_session,
-    create_tables,
-    verify_session_ownership   # ✅ added
+    register_user, login_user,
+    create_chat_session, get_chat_history,
+    get_user_sessions, rename_session,
+    delete_session, create_tables,
+    verify_session_ownership
 )
-
 from backend.auth import create_access_token, get_current_user
-from backend.chat import chat, set_vectorstore
-
+from backend.chat import chat
 from backend.rag import (
-    load_and_split,
-    add_metadata,
+    load_and_split, add_metadata,
     create_or_load_vectorstore,
     load_existing_vectorstore,
-    get_all_documents
+    get_all_documents,
+    get_session_documents
 )
 
-# ==================== INIT ====================
+UPLOAD_DIR = "temp_uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
-
 create_tables()
 
-
-# ==================== MODELS ====================
 
 class AuthRequest(BaseModel):
     username: str
@@ -54,188 +46,141 @@ class RenameRequest(BaseModel):
     title: str
 
 
-# ==================== ROOT ====================
-
 @app.get("/")
 def home():
     return {"message": "FastAPI running 🚀"}
 
 
-# ==================== AUTH ====================
-
+# -------------------- AUTH --------------------
 @app.post("/register")
 def register(request: AuthRequest):
-    try:
-        success = register_user(request.username, request.password)
-
-        if success:
-            return {"message": "User registered ✅"}
-
-        raise HTTPException(status_code=400, detail="User already exists ❌")
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    success = register_user(request.username, request.password)
+    if success:
+        return {"message": "Registered successfully ✅"}
+    raise HTTPException(status_code=400, detail="Username already exists ❌")
 
 
 @app.post("/login")
 def login(request: AuthRequest):
-    try:
-        user = login_user(request.username, request.password)
+    result = login_user(request.username, request.password)
 
-        if not user:
-            raise HTTPException(status_code=401, detail="Invalid credentials ❌")
+    if result == "not_found":
+        raise HTTPException(status_code=404, detail="User does not exist. Please register first ❌")
+    if result == "wrong_password":
+        raise HTTPException(status_code=401, detail="Incorrect password ❌")
 
-        token = create_access_token({"user_id": request.username})
-
-        return {
-            "access_token": token,
-            "token_type": "bearer"
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    token = create_access_token({"user_id": request.username})
+    return {"access_token": token, "token_type": "bearer"}
 
 
-# ==================== CHAT SESSION ====================
-
+# -------------------- SESSIONS --------------------
 @app.post("/create_chat")
-def create_chat(user_id: str = Depends(get_current_user)):
-    try:
-        session_id = create_chat_session(user_id)
-        return {"session_id": session_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def create_chat_session_api(user_id: str = Depends(get_current_user)):
+    session_id = create_chat_session(user_id)
+    return {"session_id": session_id}
 
 
 @app.get("/sessions")
 def get_sessions(user_id: str = Depends(get_current_user)):
-    try:
-        sessions = get_user_sessions(user_id)
-        return {"sessions": sessions}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"sessions": get_user_sessions(user_id)}
 
 
 @app.put("/rename_session")
 def rename_chat(req: RenameRequest, user_id: str = Depends(get_current_user)):
-    try:
-        if not verify_session_ownership(req.session_id, user_id):
-            raise HTTPException(status_code=403, detail="Unauthorized ❌")
-
-        rename_session(req.session_id, req.title)
-        return {"message": "Renamed ✅"}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if not verify_session_ownership(req.session_id, user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
+    rename_session(req.session_id, req.title, user_id)
+    return {"message": "Renamed ✅"}
 
 
 @app.delete("/delete_session/{session_id}")
 def delete_chat(session_id: int, user_id: str = Depends(get_current_user)):
-    try:
-        if not verify_session_ownership(session_id, user_id):
-            raise HTTPException(status_code=403, detail="Unauthorized ❌")
-
-        delete_session(session_id)
-        return {"message": "Deleted ✅"}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if not verify_session_ownership(session_id, user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
+    delete_session(session_id)
+    return {"message": "Deleted ✅"}
 
 
-# ==================== CHAT ====================
-
+# -------------------- CHAT --------------------
 @app.post("/chat")
 def chat_api(req: ChatRequest, user_id: str = Depends(get_current_user)):
-    try:
-        if not verify_session_ownership(req.session_id, user_id):
-            raise HTTPException(status_code=403, detail="Unauthorized ❌")
+    if not verify_session_ownership(req.session_id, user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
 
-        vectorstore = load_existing_vectorstore(user_id)
+    vectorstore = load_existing_vectorstore(user_id)
 
-        if vectorstore:
-            set_vectorstore(vectorstore)
+    # ✅ DEBUG — remove after fixing
+    if vectorstore:
+        docs = vectorstore.similarity_search(req.message, k=10)
+        print("\n--- DEBUG ---")
+        print(f"user_id: {user_id}")
+        print(f"session_id: {req.session_id}")
+        print(f"Total docs found: {len(docs)}")
+        for d in docs:
+            print(f"  metadata: {d.metadata}")
+        print("--- END DEBUG ---\n")
 
-        response = chat(
-            user_id,
-            req.session_id,
-            req.message,
-            selected_doc=req.selected_doc
-        )
-
-        return {"response": response}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    response, sources = chat(
+        user_id, req.session_id,
+        req.message, vectorstore,
+        selected_doc=req.selected_doc
+    )
+    return {"response": response, "sources": sources}
 
 
-# ==================== HISTORY ====================
-
+# -------------------- HISTORY --------------------
 @app.get("/history/{session_id}")
 def get_history(session_id: int, user_id: str = Depends(get_current_user)):
-    try:
-        if not verify_session_ownership(session_id, user_id):
-            raise HTTPException(status_code=403, detail="Unauthorized ❌")
-
-        history = get_chat_history(user_id, session_id)
-        return {"messages": history}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if not verify_session_ownership(session_id, user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
+    return {"messages": get_chat_history(user_id, session_id)}
 
 
-# ==================== DOCUMENTS ====================
-
+# -------------------- DOCUMENTS --------------------
 @app.get("/documents")
 def get_documents(user_id: str = Depends(get_current_user)):
-    try:
-        vectorstore = load_existing_vectorstore(user_id)
-
-        if not vectorstore:
-            return {"documents": []}
-
-        docs = get_all_documents(vectorstore, user_id)
-
-        return {"documents": docs}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    vectorstore = load_existing_vectorstore(user_id)
+    if not vectorstore:
+        return {"documents": []}
+    return {"documents": get_all_documents(vectorstore, user_id)}
 
 
-# ==================== FILE UPLOAD ====================
+@app.get("/documents/{session_id}")
+def get_session_docs(session_id: int, user_id: str = Depends(get_current_user)):
+    if not verify_session_ownership(session_id, user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
+    vectorstore = load_existing_vectorstore(user_id)
+    if not vectorstore:
+        return {"documents": []}
+    return {"documents": get_session_documents(vectorstore, user_id, session_id)}
 
+
+# -------------------- UPLOAD --------------------
 @app.post("/upload")
 def upload_file(
     file: UploadFile = File(...),
-    session_id: int = 1,
+    session_id: int = Form(...),
     user_id: str = Depends(get_current_user)
 ):
+    if not verify_session_ownership(session_id, user_id):
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
+
+    filename = f"{user_id}_{uuid.uuid4()}_{file.filename}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
     try:
-        if not verify_session_ownership(session_id, user_id):
-            raise HTTPException(status_code=403, detail="Unauthorized ❌")
-
-        # ✅ Safe filename
-        filename = f"{user_id}_{uuid.uuid4()}_{file.filename}"
-        file_path = filename
-
-        # ✅ Save file
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # ✅ Process document
         chunks = load_and_split(file_path)
+        chunks = add_metadata(chunks, user_id, session_id, file.filename)
+        create_or_load_vectorstore(chunks, user_id)
 
-        chunks = add_metadata(
-            chunks,
-            user_id,
-            session_id,
-            file.filename
-        )
-
-        vectorstore = create_or_load_vectorstore(chunks, user_id)
-
-        set_vectorstore(vectorstore)
-
-        return {"message": "File uploaded & processed ✅"}
+        return {"message": f"{file.filename} uploaded & processed ✅"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
