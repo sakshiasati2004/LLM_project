@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+import pandas as pd
 
 API_URL = "http://127.0.0.1:8000"
 st.set_page_config(layout="wide", page_title="RAG + NL2SQL Chatbot")
@@ -12,6 +13,7 @@ for key, default in {
     "uploaded_files": {},
     "renaming_session": None,
     "sql_file_uploaded": False,
+    "sql_table_info": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -26,35 +28,38 @@ if not st.session_state.token:
 
     if option == "Register":
         if st.button("Register"):
-            res = requests.post(f"{API_URL}/register", json={
-                "username": username, "password": password
-            })
-            if res.status_code == 200:
-                st.success("Registered successfully ✅")
+            if not username or not password:
+                st.warning("Please enter username and password")
             else:
-                st.error(res.json().get("detail", "Error"))
+                res = requests.post(f"{API_URL}/register", json={
+                    "username": username, "password": password
+                })
+                if res.status_code == 200:
+                    st.success("Registered successfully! Please login ✅")
+                else:
+                    st.error(res.json().get("detail", "Registration failed"))
 
     if option == "Login":
         if st.button("Login"):
-            res = requests.post(f"{API_URL}/login", json={
-                "username": username, "password": password
-            })
-            data = res.json()
-
-            if res.status_code == 404:
-                st.error("❌ User does not exist. Please register first.")
-            elif res.status_code == 401:
-                st.error("❌ Incorrect password.")
-            elif "access_token" in data:
-                st.session_state.token = data["access_token"]
-                headers = {"Authorization": f"Bearer {st.session_state.token}"}
-
-                # ✅ Create new session on every login (as you want)
-                res2 = requests.post(f"{API_URL}/create_chat", headers=headers)
-                st.session_state.session_id = res2.json()["session_id"]
-                st.rerun()
+            if not username or not password:
+                st.warning("Please enter username and password")
             else:
-                st.error(data.get("detail", "Login failed"))
+                res = requests.post(f"{API_URL}/login", json={
+                    "username": username, "password": password
+                })
+                data = res.json()
+                if res.status_code == 404:
+                    st.error("❌ User does not exist. Please register first.")
+                elif res.status_code == 401:
+                    st.error("❌ Incorrect password.")
+                elif "access_token" in data:
+                    st.session_state.token = data["access_token"]
+                    headers = {"Authorization": f"Bearer {st.session_state.token}"}
+                    res2 = requests.post(f"{API_URL}/create_chat", headers=headers)
+                    st.session_state.session_id = res2.json()["session_id"]
+                    st.rerun()
+                else:
+                    st.error("Login failed")
 
     st.stop()
 
@@ -62,7 +67,6 @@ if not st.session_state.token:
 # ==================== MAIN ====================
 headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-# ✅ Auto create session if none exists
 if not st.session_state.session_id:
     res = requests.post(f"{API_URL}/create_chat", headers=headers)
     st.session_state.session_id = res.json()["session_id"]
@@ -94,11 +98,9 @@ with tab1:
             title = session["title"] or f"Chat {sid}"
             is_active = st.session_state.session_id == sid
 
-            # ✅ Rename mode
             if st.session_state.renaming_session == sid:
                 new_title = st.text_input(
-                    "Rename", value=title,
-                    key=f"rename_input_{sid}"
+                    "Rename", value=title, key=f"rename_input_{sid}"
                 )
                 col_save, col_cancel = st.columns(2)
                 with col_save:
@@ -129,20 +131,16 @@ with tab1:
                 with col_del:
                     if st.button("🗑", key=f"del_{sid}"):
                         requests.delete(
-                            f"{API_URL}/delete_session/{sid}",
-                            headers=headers
+                            f"{API_URL}/delete_session/{sid}", headers=headers
                         )
                         if st.session_state.session_id == sid:
                             remaining = [s for s in sessions if s["id"] != sid]
-                            if remaining:
-                                st.session_state.session_id = remaining[0]["id"]
-                            else:
-                                st.session_state.session_id = None
+                            st.session_state.session_id = remaining[0]["id"] if remaining else None
                         st.rerun()
 
         st.markdown("---")
-
         st.title("📄 Documents")
+
         if st.session_state.session_id:
             res = requests.get(
                 f"{API_URL}/documents/{st.session_state.session_id}",
@@ -152,15 +150,11 @@ with tab1:
         else:
             session_docs = []
 
-        selected = st.selectbox(
-            "Filter",
-            ["All Documents"] + session_docs
-        )
+        selected = st.selectbox("Filter", ["All Documents"] + session_docs)
         st.session_state.selected_doc = selected
 
-    # ==================== MAIN CHAT AREA ====================
+    # ==================== RAG MAIN ====================
     st.title("💬 RAG Chatbot")
-
     col1, col2 = st.columns([1, 3])
 
     with col1:
@@ -172,11 +166,21 @@ with tab1:
                 st.caption(f"• {d}")
 
         uploaded_file = st.file_uploader(
-            "Upload file",
-            type=["pdf", "txt", "csv", "docx"]
+            "Upload file (PDF, TXT, DOC, DOCX, MSG, CHM)",
+            type=None
         )
 
         if uploaded_file:
+
+            # ✅ NEW CODE (ADDED ONLY)
+            allowed_ext = ["pdf", "txt", "doc", "docx", "msg", "chm"]
+            file_ext = uploaded_file.name.split(".")[-1].lower()
+
+            if file_ext not in allowed_ext:
+                st.error(f"❌ Unsupported file type: .{file_ext}")
+                st.stop()
+
+            # ✅ EXISTING CODE (UNCHANGED)
             sid = st.session_state.session_id
             file_key = f"{uploaded_file.name}_{uploaded_file.size}"
 
@@ -188,7 +192,6 @@ with tab1:
                     res = requests.post(
                         f"{API_URL}/upload",
                         headers=headers,
-                        # ✅ FIXED — correct file upload format
                         files={"file": (uploaded_file.name, uploaded_file, uploaded_file.type)},
                         data={"session_id": sid}
                     )
@@ -235,7 +238,6 @@ with tab1:
                 data = res.json()
                 response = data.get("response", "")
                 sources = data.get("sources", [])
-
                 with st.chat_message("assistant"):
                     st.write(response)
                     if sources:
@@ -244,81 +246,3 @@ with tab1:
                 st.error("⚠️ Server error. Please try again.")
 
             st.rerun()
-
-
-# =========================================================
-# ==================== TAB 2: NL2SQL ======================
-# =========================================================
-with tab2:
-
-    st.title("🧮 NL2SQL Assistant")
-
-    col1, col2 = st.columns([1, 3])
-
-    with col1:
-        st.subheader("📂 Upload Table File")
-
-        sql_file = st.file_uploader(
-            "Upload CSV / Excel / DB",
-            type=["csv", "xlsx", "db"]
-        )
-
-        if sql_file:
-            with st.spinner("Processing..."):
-                res = requests.post(
-                    f"{API_URL}/upload_sql",
-                    headers=headers,
-                    files={"file": sql_file}
-                )
-
-            if res.status_code == 200:
-                data = res.json()
-                st.success("Uploaded ✅")
-                st.write("Table:", data["table_name"])
-                st.write("Columns:", data["columns"])
-                st.session_state.sql_file_uploaded = True
-            else:
-                st.error(res.json().get("detail"))
-
-    with col2:
-        st.subheader("💬 Ask SQL Queries")
-
-        if not st.session_state.sql_file_uploaded:
-            st.info("Upload a file first 👈")
-        else:
-            query = st.chat_input("Ask like: show top 5 rows")
-
-            if query:
-                with st.spinner("Generating SQL..."):
-                    res = requests.post(
-                        f"{API_URL}/query_sql",
-                        headers=headers,
-                        json={"message": query}
-                    )
-
-                if res.status_code == 200:
-                    data = res.json()
-
-                    st.write("🧠 SQL:")
-                    st.code(data.get("sql_query", ""), language="sql")
-
-                    if data.get("type") == "select":
-                        st.dataframe(data.get("data"))
-
-                    elif data.get("type") == "modify":
-                        file_path = data.get("download_file")
-                        st.success("File updated ✅")
-
-                        download_res = requests.get(
-                            f"{API_URL}/download_sql",
-                            headers=headers,
-                            params={"file_path": file_path}
-                        )
-
-                        st.download_button(
-                            "⬇️ Download Updated File",
-                            download_res.content,
-                            file_name="updated_file.csv"
-                        )
-                else:
-                    st.error("Query failed ❌")

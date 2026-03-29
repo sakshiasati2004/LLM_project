@@ -7,7 +7,11 @@ from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
 
-from backend.nl2sql import load_file, generate_sql, execute_sql
+from backend.nl2sql import (
+    load_file, load_postgres,
+    generate_sql, execute_sql,
+    get_table_info
+)
 
 from backend.db import (
     register_user, login_user,
@@ -28,12 +32,12 @@ from backend.rag import (
     get_session_documents
 )
 
-# -------------------- CONFIG --------------------
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 create_tables()
+
 
 # ==================== MODELS ====================
 
@@ -41,20 +45,20 @@ class AuthRequest(BaseModel):
     username: str
     password: str
 
-
 class ChatRequest(BaseModel):
     session_id: int
     message: str
     selected_doc: Optional[str] = "All Documents"
 
-
 class RenameRequest(BaseModel):
     session_id: int
     title: str
 
-
 class SQLQueryRequest(BaseModel):
     message: str
+
+class PostgresRequest(BaseModel):
+    connection_string: str
 
 
 # ==================== ROOT ====================
@@ -118,41 +122,16 @@ def delete_chat(session_id: int, user_id: str = Depends(get_current_user)):
 
 @app.post("/chat")
 def chat_api(req: ChatRequest, user_id: str = Depends(get_current_user)):
-
     if not verify_session_ownership(req.session_id, user_id):
         raise HTTPException(status_code=403, detail="Unauthorized ❌")
 
     vectorstore = load_existing_vectorstore(user_id)
-
-    # ✅ DEBUG — remove after fixing
-    if vectorstore:
-        docs = vectorstore.similarity_search(req.message, k=10)
-        print("\n--- DEBUG ---")
-        print(f"user_id: {user_id}")
-        print(f"session_id: {req.session_id}")
-        print(f"Total docs found: {len(docs)}")
-        for d in docs:
-            print(f"  metadata: {d.metadata}")
-        print("--- END DEBUG ---\n")
-    else:
-        print("\n--- DEBUG ---")
-        print(f"user_id: {user_id}")
-        print(f"session_id: {req.session_id}")
-        print("vectorstore is None — no documents uploaded yet")
-        print("--- END DEBUG ---\n")
-
     response, sources = chat(
-        user_id,
-        req.session_id,
-        req.message,
-        vectorstore,
+        user_id, req.session_id,
+        req.message, vectorstore,
         selected_doc=req.selected_doc
     )
-
-    return {
-        "response": response,
-        "sources": sources
-    }
+    return {"response": response, "sources": sources}
 
 
 # ==================== HISTORY ====================
@@ -184,7 +163,7 @@ def get_session_docs(session_id: int, user_id: str = Depends(get_current_user)):
     return {"documents": get_session_documents(vectorstore, user_id, session_id)}
 
 
-# ==================== RAG FILE UPLOAD ====================
+# ==================== RAG UPLOAD ====================
 
 @app.post("/upload")
 def upload_file(
@@ -206,19 +185,10 @@ def upload_file(
         chunks = add_metadata(chunks, user_id, session_id, file.filename)
         create_or_load_vectorstore(chunks, user_id)
 
-        # ✅ DEBUG upload
-        print(f"\n--- UPLOAD DEBUG ---")
-        print(f"user_id: {user_id}")
-        print(f"session_id: {session_id}")
-        print(f"file: {file.filename}")
-        print(f"chunks created: {len(chunks)}")
-        print(f"--- END UPLOAD DEBUG ---\n")
-
         return {"message": f"{file.filename} uploaded & processed ✅"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
@@ -241,17 +211,42 @@ def upload_sql_file(
         table_name, columns = load_file(file_path, user_id)
 
         return {
-            "message": "File uploaded for NL2SQL ✅",
+            "message": "File uploaded ✅",
             "table_name": table_name,
             "columns": columns
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
+
+
+@app.post("/connect_postgres")
+def connect_postgres(
+    req: PostgresRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """Connect to PostgreSQL database"""
+    try:
+        table_name, columns = load_postgres(req.connection_string, user_id)
+        return {
+            "message": "PostgreSQL connected ✅",
+            "table_name": table_name,
+            "columns": columns
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/table_info")
+def table_info(user_id: str = Depends(get_current_user)):
+    """Get current table info"""
+    info = get_table_info(user_id)
+    if not info:
+        return {"loaded": False}
+    return {"loaded": True, **info}
 
 
 @app.post("/query_sql")
@@ -273,7 +268,7 @@ def download_sql(
     user_id: str = Depends(get_current_user)
 ):
     if user_id not in file_path:
-        raise HTTPException(status_code=403, detail="Unauthorized file access ❌")
+        raise HTTPException(status_code=403, detail="Unauthorized ❌")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found ❌")
     return FileResponse(

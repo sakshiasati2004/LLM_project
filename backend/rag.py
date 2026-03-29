@@ -1,11 +1,15 @@
 import os
 from dotenv import load_dotenv
 from langchain_community.document_loaders import (
-    PyPDFLoader, TextLoader, CSVLoader, UnstructuredWordDocumentLoader
+    PyPDFLoader,
+    TextLoader,
+    CSVLoader,
+    UnstructuredWordDocumentLoader
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
+from langchain_core.documents import Document
 
 load_dotenv()
 
@@ -15,23 +19,89 @@ FAISS_BASE_DIR = os.path.join(
 os.makedirs(FAISS_BASE_DIR, exist_ok=True)
 
 
+# -------------------- DOCUMENT LOADERS --------------------
+
+def load_msg_file(file_path):
+    """Load .msg (Outlook email) files"""
+    try:
+        import extract_msg
+        msg = extract_msg.Message(file_path)
+        content = f"""
+Subject: {msg.subject}
+From: {msg.sender}
+To: {msg.to}
+Date: {msg.date}
+Body:
+{msg.body}
+"""
+        return [Document(page_content=content, metadata={"source": file_path})]
+    except Exception as e:
+        raise ValueError(f"Error loading .msg file: {str(e)}")
+
+
+def load_chm_file(file_path):
+    """Load .chm (Help) files"""
+    try:
+        import chm.chm as chmlib
+        chm_file = chmlib.CHMFile()
+        chm_file.LoadCHM(file_path)
+
+        contents = []
+        def get_files(chm, ui, ctx):
+            path = ui.path.decode("utf-8") if isinstance(ui.path, bytes) else ui.path
+            if path.endswith(".html") or path.endswith(".htm"):
+                result, content = chm.RetrieveObject(ui)
+                if result == 0 and content:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(content, "html.parser")
+                    text = soup.get_text(separator="\n")
+                    if text.strip():
+                        contents.append(text)
+
+        chm_file.EnumerateFiles(get_files, None)
+        chm_file.CloseCHM()
+
+        if not contents:
+            raise ValueError("No readable content found in .chm file")
+
+        full_text = "\n\n".join(contents)
+        return [Document(page_content=full_text, metadata={"source": file_path})]
+    except Exception as e:
+        raise ValueError(f"Error loading .chm file: {str(e)}")
+
+
 def load_document(file_path):
+    """Load document based on file extension"""
     ext = os.path.splitext(file_path)[1].lower()
-    loaders = {
-        ".pdf": PyPDFLoader,
-        ".txt": TextLoader,
-        ".csv": CSVLoader,
-        ".doc": UnstructuredWordDocumentLoader,
-        ".docx": UnstructuredWordDocumentLoader,
-    }
-    if ext not in loaders:
+
+    if ext == ".pdf":
+        return PyPDFLoader(file_path).load()
+
+    elif ext == ".txt":
+        return TextLoader(file_path).load()
+
+    elif ext == ".csv":
+        return CSVLoader(file_path).load()
+
+    elif ext in [".doc", ".docx"]:
+        return UnstructuredWordDocumentLoader(file_path).load()
+
+    elif ext == ".msg":
+        return load_msg_file(file_path)
+
+    elif ext == ".chm":
+        return load_chm_file(file_path)
+
+    else:
         raise ValueError(f"Unsupported file type: {ext}")
-    return loaders[ext](file_path).load()
 
 
 def load_and_split(file_path):
     documents = load_document(file_path)
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,
+        chunk_overlap=50
+    )
     return splitter.split_documents(documents)
 
 
@@ -75,17 +145,17 @@ def load_existing_vectorstore(user_id):
     if not os.path.exists(path):
         return None
     embeddings = get_embeddings()
-    return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
+    return FAISS.load_local(
+        path, embeddings, allow_dangerous_deserialization=True
+    )
 
 
 def get_context_from_query(vectorstore, query, user_id, session_id, selected_doc="All Documents"):
     docs = vectorstore.similarity_search(query, k=10)
 
-    # ✅ Filter by selected doc first
     if selected_doc != "All Documents":
         docs = [d for d in docs if d.metadata.get("file_name") == selected_doc]
 
-    # ✅ STRICT: Only use docs from THIS session — no cross-session bleed
     session_docs = [
         d for d in docs
         if str(d.metadata.get("session_id")) == str(session_id)
@@ -94,10 +164,11 @@ def get_context_from_query(vectorstore, query, user_id, session_id, selected_doc
 
     if session_docs:
         context = "\n\n".join([d.page_content for d in session_docs[:3]])
-        file_names = list(set([d.metadata.get("file_name", "Unknown") for d in session_docs]))
+        file_names = list(set([
+            d.metadata.get("file_name", "Unknown") for d in session_docs
+        ]))
         return context, "current", file_names
 
-    # ✅ No cross-session fallback — new chat = clean slate
     return "", "none", []
 
 
@@ -116,7 +187,6 @@ def get_all_documents(vectorstore, user_id):
 
 
 def get_session_documents(vectorstore, user_id, session_id):
-    """✅ Get documents uploaded in a specific session"""
     if not vectorstore:
         return []
     try:
