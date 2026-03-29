@@ -76,22 +76,16 @@ def load_document(file_path):
 
     if ext == ".pdf":
         return PyPDFLoader(file_path).load()
-
     elif ext == ".txt":
         return TextLoader(file_path).load()
-
     elif ext == ".csv":
         return CSVLoader(file_path).load()
-
     elif ext in [".doc", ".docx"]:
         return UnstructuredWordDocumentLoader(file_path).load()
-
     elif ext == ".msg":
         return load_msg_file(file_path)
-
     elif ext == ".chm":
         return load_chm_file(file_path)
-
     else:
         raise ValueError(f"Unsupported file type: {ext}")
 
@@ -102,7 +96,21 @@ def load_and_split(file_path):
         chunk_size=500,
         chunk_overlap=50
     )
-    return splitter.split_documents(documents)
+    chunks = splitter.split_documents(documents)
+
+    # ✅ NEW: Filter out empty/invalid chunks that break embeddings
+    valid_chunks = []
+    for chunk in chunks:
+        content = chunk.page_content.strip()
+        if not content:
+            continue
+        if len(content) < 10:
+            continue
+        # ✅ Clean binary/special characters
+        chunk.page_content = content.encode('utf-8', errors='ignore').decode('utf-8')
+        valid_chunks.append(chunk)
+
+    return valid_chunks
 
 
 def add_metadata(chunks, user_id, session_id, file_name):
