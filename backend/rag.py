@@ -25,14 +25,29 @@ def load_msg_file(file_path):
     """Load .msg (Outlook email) files"""
     try:
         import extract_msg
+        from bs4 import BeautifulSoup
+
         msg = extract_msg.Message(file_path)
-        content = f"""
-Subject: {msg.subject}
+
+        # ✅ Try plain body first, then HTML body as fallback
+        body = msg.body
+        if not body or not body.strip():
+            if msg.htmlBody:
+                html = msg.htmlBody
+                if isinstance(html, bytes):
+                    html = html.decode('utf-8', errors='ignore')
+                soup = BeautifulSoup(html, "html.parser")
+                body = soup.get_text(separator="\n").strip()
+
+        # ✅ Clean null characters from subject
+        subject = msg.subject.replace('\x00', '').strip() if msg.subject else ''
+
+        content = f"""Subject: {subject}
 From: {msg.sender}
 To: {msg.to}
 Date: {msg.date}
 Body:
-{msg.body}
+{body}
 """
         return [Document(page_content=content, metadata={"source": file_path})]
     except Exception as e:
