@@ -165,14 +165,26 @@ with tab1:
             for d in session_docs:
                 st.caption(f"• {d}")
 
+        # ✅ UPDATED: JavaScript inject to force browser to show .msg files in file picker
+        st.markdown("""
+            <script>
+            const interval = setInterval(() => {
+                const input = document.querySelector('input[type="file"]');
+                if (input) {
+                    input.setAttribute('accept', '.pdf,.txt,.doc,.docx,.msg,.chm,application/vnd.ms-outlook');
+                    clearInterval(interval);
+                }
+            }, 300);
+            </script>
+        """, unsafe_allow_html=True)
+
         uploaded_file = st.file_uploader(
-            "Upload file (PDF, TXT, DOC, DOCX, MSG, CHM)",
-            type=None
+            "Upload file (PDF, TXT, DOC, DOCX, MSG, CHM) — 💡 If .msg not visible, select 'All Files' in file picker",
+            type=["pdf", "txt", "doc", "docx", "msg", "chm"]
         )
 
         if uploaded_file:
 
-            # ✅ NEW CODE (ADDED ONLY)
             allowed_ext = ["pdf", "txt", "doc", "docx", "msg", "chm"]
             file_ext = uploaded_file.name.split(".")[-1].lower()
 
@@ -180,7 +192,6 @@ with tab1:
                 st.error(f"❌ Unsupported file type: .{file_ext}")
                 st.stop()
 
-            # ✅ EXISTING CODE (UNCHANGED)
             sid = st.session_state.session_id
             file_key = f"{uploaded_file.name}_{uploaded_file.size}"
 
@@ -192,7 +203,7 @@ with tab1:
                     res = requests.post(
                         f"{API_URL}/upload",
                         headers=headers,
-                        files={"file": (uploaded_file.name, uploaded_file, uploaded_file.type)},
+                        files={"file": (uploaded_file.name, uploaded_file.getvalue(), "application/octet-stream")},
                         data={"session_id": sid}
                     )
                 if res.status_code == 200:

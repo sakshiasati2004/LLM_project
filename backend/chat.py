@@ -26,20 +26,18 @@ def chat(user_id, session_id, user_message, vectorstore=None, selected_doc="All 
 
     # -------------------- BUILD PROMPT --------------------
     if context and len(context.strip()) > 20:
-        # ✅ Document context available — inject into prompt
-        # ✅ UPDATED: stronger instruction to use document context
-        prompt = f"""You are a helpful assistant that answers questions based on the provided context.
+        # ✅ Document context available — use if relevant, else use general knowledge
+        prompt = f"""You are a helpful assistant.
 
-IMPORTANT RULES:
-1. Answer ONLY from the context provided below
-2. If the answer is in the context, use it directly and completely
-3. Do NOT say you didn't use the document or don't have access to it
-4. Do NOT mention the word "context" in your answer
-5. Only use your own knowledge if the context has NO relevant information at all
-6. Answer naturally as if you know this information
-
-Context:
+You have access to the following document content:
 {context}
+
+Answer the question below following these rules:
+1. If the question is related to the document content above, answer from it
+2. If the question is NOT related to the document, answer from your own general knowledge normally
+3. Do NOT say you cannot answer or that the context does not contain the information
+4. Do NOT mention the word "context" in your answer
+5. Answer naturally and helpfully
 
 Question:
 {user_message}

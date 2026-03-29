@@ -174,6 +174,15 @@ def upload_file(
     if not verify_session_ownership(session_id, user_id):
         raise HTTPException(status_code=403, detail="Unauthorized ❌")
 
+    # ✅ ADDED: explicit file type validation with clear error message
+    allowed_extensions = {"pdf", "txt", "doc", "docx", "msg", "chm"}
+    file_ext = file.filename.rsplit(".", 1)[-1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: .{file_ext}. Allowed: pdf, txt, doc, docx, msg, chm"
+        )
+
     filename = f"{user_id}_{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, filename)
 
