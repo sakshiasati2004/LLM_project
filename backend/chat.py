@@ -25,7 +25,7 @@ def chat(user_id, session_id, user_message, vectorstore=None, selected_doc="All 
         )
 
     # -------------------- BUILD PROMPT --------------------
-    if context and len(context.strip()) > 100:
+    if context and len(context.strip()) > 20:
         # ✅ Document context available — inject into prompt
         prompt = f"""You are a helpful assistant.
 
@@ -62,7 +62,7 @@ Question:
     # ✅ Sources returned separately (not embedded in response string)
     sources = (
         list(file_names)
-        if (context and len(context.strip()) > 100 and file_names)
+        if (context and len(context.strip()) > 20 and file_names)
         else []
     )
 

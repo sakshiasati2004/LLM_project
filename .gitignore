@@ -15,3 +15,7 @@ faiss_index_*/
 *.csv
 
 .DS_Store
+
+faiss_indexes/
+faiss_index/
+faiss_index_*/

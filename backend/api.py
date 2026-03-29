@@ -5,6 +5,9 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel
+from fastapi.responses import FileResponse
+
+from backend.nl2sql import load_file, generate_sql, execute_sql
 
 from backend.db import (
     register_user, login_user,
@@ -13,8 +16,10 @@ from backend.db import (
     delete_session, create_tables,
     verify_session_ownership
 )
+
 from backend.auth import create_access_token, get_current_user
 from backend.chat import chat
+
 from backend.rag import (
     load_and_split, add_metadata,
     create_or_load_vectorstore,
@@ -23,12 +28,14 @@ from backend.rag import (
     get_session_documents
 )
 
+# -------------------- CONFIG --------------------
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 create_tables()
 
+# ==================== MODELS ====================
 
 class AuthRequest(BaseModel):
     username: str
@@ -46,12 +53,19 @@ class RenameRequest(BaseModel):
     title: str
 
 
+class SQLQueryRequest(BaseModel):
+    message: str
+
+
+# ==================== ROOT ====================
+
 @app.get("/")
 def home():
     return {"message": "FastAPI running 🚀"}
 
 
-# -------------------- AUTH --------------------
+# ==================== AUTH ====================
+
 @app.post("/register")
 def register(request: AuthRequest):
     success = register_user(request.username, request.password)
@@ -63,17 +77,16 @@ def register(request: AuthRequest):
 @app.post("/login")
 def login(request: AuthRequest):
     result = login_user(request.username, request.password)
-
     if result == "not_found":
-        raise HTTPException(status_code=404, detail="User does not exist. Please register first ❌")
+        raise HTTPException(status_code=404, detail="User does not exist ❌")
     if result == "wrong_password":
         raise HTTPException(status_code=401, detail="Incorrect password ❌")
-
     token = create_access_token({"user_id": request.username})
     return {"access_token": token, "token_type": "bearer"}
 
 
-# -------------------- SESSIONS --------------------
+# ==================== SESSIONS ====================
+
 @app.post("/create_chat")
 def create_chat_session_api(user_id: str = Depends(get_current_user)):
     session_id = create_chat_session(user_id)
@@ -101,9 +114,11 @@ def delete_chat(session_id: int, user_id: str = Depends(get_current_user)):
     return {"message": "Deleted ✅"}
 
 
-# -------------------- CHAT --------------------
+# ==================== CHAT ====================
+
 @app.post("/chat")
 def chat_api(req: ChatRequest, user_id: str = Depends(get_current_user)):
+
     if not verify_session_ownership(req.session_id, user_id):
         raise HTTPException(status_code=403, detail="Unauthorized ❌")
 
@@ -119,16 +134,29 @@ def chat_api(req: ChatRequest, user_id: str = Depends(get_current_user)):
         for d in docs:
             print(f"  metadata: {d.metadata}")
         print("--- END DEBUG ---\n")
+    else:
+        print("\n--- DEBUG ---")
+        print(f"user_id: {user_id}")
+        print(f"session_id: {req.session_id}")
+        print("vectorstore is None — no documents uploaded yet")
+        print("--- END DEBUG ---\n")
 
     response, sources = chat(
-        user_id, req.session_id,
-        req.message, vectorstore,
+        user_id,
+        req.session_id,
+        req.message,
+        vectorstore,
         selected_doc=req.selected_doc
     )
-    return {"response": response, "sources": sources}
+
+    return {
+        "response": response,
+        "sources": sources
+    }
 
 
-# -------------------- HISTORY --------------------
+# ==================== HISTORY ====================
+
 @app.get("/history/{session_id}")
 def get_history(session_id: int, user_id: str = Depends(get_current_user)):
     if not verify_session_ownership(session_id, user_id):
@@ -136,7 +164,8 @@ def get_history(session_id: int, user_id: str = Depends(get_current_user)):
     return {"messages": get_chat_history(user_id, session_id)}
 
 
-# -------------------- DOCUMENTS --------------------
+# ==================== DOCUMENTS ====================
+
 @app.get("/documents")
 def get_documents(user_id: str = Depends(get_current_user)):
     vectorstore = load_existing_vectorstore(user_id)
@@ -155,7 +184,8 @@ def get_session_docs(session_id: int, user_id: str = Depends(get_current_user)):
     return {"documents": get_session_documents(vectorstore, user_id, session_id)}
 
 
-# -------------------- UPLOAD --------------------
+# ==================== RAG FILE UPLOAD ====================
+
 @app.post("/upload")
 def upload_file(
     file: UploadFile = File(...),
@@ -176,6 +206,14 @@ def upload_file(
         chunks = add_metadata(chunks, user_id, session_id, file.filename)
         create_or_load_vectorstore(chunks, user_id)
 
+        # ✅ DEBUG upload
+        print(f"\n--- UPLOAD DEBUG ---")
+        print(f"user_id: {user_id}")
+        print(f"session_id: {session_id}")
+        print(f"file: {file.filename}")
+        print(f"chunks created: {len(chunks)}")
+        print(f"--- END UPLOAD DEBUG ---\n")
+
         return {"message": f"{file.filename} uploaded & processed ✅"}
 
     except Exception as e:
@@ -184,3 +222,62 @@ def upload_file(
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
+
+
+# ==================== NL2SQL ====================
+
+@app.post("/upload_sql")
+def upload_sql_file(
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user)
+):
+    filename = f"{user_id}_{uuid.uuid4()}_{file.filename}"
+    file_path = os.path.join(UPLOAD_DIR, filename)
+
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        table_name, columns = load_file(file_path, user_id)
+
+        return {
+            "message": "File uploaded for NL2SQL ✅",
+            "table_name": table_name,
+            "columns": columns
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
+
+@app.post("/query_sql")
+def query_sql(
+    req: SQLQueryRequest,
+    user_id: str = Depends(get_current_user)
+):
+    try:
+        sql_query = generate_sql(user_id, req.message)
+        result = execute_sql(user_id, sql_query)
+        return {"sql_query": sql_query, **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/download_sql")
+def download_sql(
+    file_path: str,
+    user_id: str = Depends(get_current_user)
+):
+    if user_id not in file_path:
+        raise HTTPException(status_code=403, detail="Unauthorized file access ❌")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found ❌")
+    return FileResponse(
+        path=file_path,
+        filename=os.path.basename(file_path),
+        media_type="application/octet-stream"
+    )
