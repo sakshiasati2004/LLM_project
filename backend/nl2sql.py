@@ -1,6 +1,6 @@
 import os
+import re
 import sqlite3
-import json
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -12,15 +12,20 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1"
 )
 
-# -------------------- STORAGE --------------------
-# Per-user storage: {user_id: {"df": df, "table_name": str, "columns": [], "source_type": str, "db_path": str}}
 user_data_store = {}
 
 MODIFIED_DIR = "modified_files"
 os.makedirs(MODIFIED_DIR, exist_ok=True)
 
 
-# -------------------- LOAD FILE --------------------
+def _clean_table_name(name):
+    """✅ Clean table name — remove all special characters"""
+    name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+    name = name.strip('_')
+    if name and name[0].isdigit():
+        name = f"t_{name}"
+    return name or "data_table"
+
 
 def load_file(file_path, user_id):
     """Load CSV, Excel, SQLite into memory for a user"""
@@ -28,13 +33,15 @@ def load_file(file_path, user_id):
 
     if ext == ".csv":
         df = pd.read_csv(file_path)
-        table_name = os.path.splitext(os.path.basename(file_path))[0]
+        raw_name = os.path.splitext(os.path.basename(file_path))[0]
+        table_name = _clean_table_name(raw_name)
         source_type = "csv"
         db_path = _save_to_sqlite(df, table_name, user_id)
 
     elif ext in [".xlsx", ".xls"]:
         df = pd.read_excel(file_path)
-        table_name = os.path.splitext(os.path.basename(file_path))[0]
+        raw_name = os.path.splitext(os.path.basename(file_path))[0]
+        table_name = _clean_table_name(raw_name)
         source_type = "excel"
         db_path = _save_to_sqlite(df, table_name, user_id)
 
@@ -74,13 +81,11 @@ def load_file(file_path, user_id):
 def load_postgres(connection_string, user_id):
     """Load PostgreSQL table"""
     try:
-        import psycopg2
-        from sqlalchemy import create_engine
+        from sqlalchemy import create_engine, inspect
 
         engine = create_engine(connection_string)
         conn = engine.connect()
 
-        from sqlalchemy import text, inspect
         inspector = inspect(engine)
         tables = inspector.get_table_names()
 
@@ -92,9 +97,7 @@ def load_postgres(connection_string, user_id):
         conn.close()
 
         columns = df.columns.tolist()
-
-        # Save to local SQLite for query execution
-        db_path = _df_to_sqlite(df, table_name, user_id)
+        db_path = _save_to_sqlite(df, table_name, user_id)
 
         user_data_store[user_id] = {
             "df": df,
@@ -111,12 +114,10 @@ def load_postgres(connection_string, user_id):
         raise ValueError(f"PostgreSQL connection failed: {str(e)}")
 
 
-# -------------------- INTERNAL HELPERS --------------------
-
 def _save_to_sqlite(df, table_name, user_id):
     """Save DataFrame to user-specific SQLite DB"""
-    # Clean table name
-    table_name = table_name.replace(" ", "_").replace("-", "_")
+    # ✅ Clean table name before saving
+    table_name = _clean_table_name(table_name)
     db_path = os.path.join(MODIFIED_DIR, f"{user_id}_data.db")
     conn = sqlite3.connect(db_path)
     df.to_sql(table_name, conn, if_exists="replace", index=False)
@@ -137,8 +138,6 @@ def _copy_db(file_path, user_id):
     return db_path
 
 
-# -------------------- SQL GENERATION --------------------
-
 def generate_sql(user_id, user_message):
     """Generate SQL from natural language using LLM"""
     if user_id not in user_data_store:
@@ -157,12 +156,13 @@ User request: {user_message}
 
 Rules:
 1. Generate a valid SQLite SQL query
-2. Use the exact table name and column names provided
-3. For SELECT queries, use appropriate WHERE, ORDER BY, LIMIT clauses
-4. For UPDATE queries, always include a WHERE clause
-5. For DELETE queries, always include a WHERE clause
-6. For INSERT queries, include all required columns
-7. Return ONLY the SQL query, nothing else, no explanation, no markdown
+2. Use the exact table name: {table_name}
+3. Use the exact column names provided
+4. For SELECT queries, use appropriate WHERE, ORDER BY, LIMIT clauses
+5. For UPDATE queries, always include a WHERE clause
+6. For DELETE queries, always include a WHERE clause
+7. For INSERT queries, include all required columns
+8. Return ONLY the SQL query, nothing else, no explanation, no markdown
 
 SQL Query:"""
 
@@ -174,12 +174,9 @@ SQL Query:"""
     )
 
     sql = response.choices[0].message.content.strip()
-    # Clean markdown if LLM adds it
     sql = sql.replace("```sql", "").replace("```", "").strip()
     return sql
 
-
-# -------------------- SQL EXECUTION --------------------
 
 def execute_sql(user_id, sql_query):
     """Execute SQL and return results with user-friendly summary"""
@@ -191,19 +188,14 @@ def execute_sql(user_id, sql_query):
     table_name = store["table_name"]
 
     sql_upper = sql_query.strip().upper()
-
     conn = sqlite3.connect(db_path)
 
     try:
-        # -------------------- SELECT --------------------
         if sql_upper.startswith("SELECT"):
             df_result = pd.read_sql_query(sql_query, conn)
             conn.close()
 
             row_count = len(df_result)
-            col_count = len(df_result.columns)
-
-            # ✅ Generate user-friendly summary
             summary = _generate_summary(
                 user_id=user_id,
                 sql_query=sql_query,
@@ -219,19 +211,16 @@ def execute_sql(user_id, sql_query):
                 "summary": summary
             }
 
-        # -------------------- UPDATE --------------------
         elif sql_upper.startswith("UPDATE"):
             cursor = conn.cursor()
             cursor.execute(sql_query)
             affected = cursor.rowcount
             conn.commit()
 
-            # ✅ Save modified file
             df_updated = pd.read_sql(f"SELECT * FROM '{table_name}'", conn)
             conn.close()
 
             file_path = _save_modified_file(df_updated, user_id, store["source_type"])
-
             summary = _generate_summary(
                 user_id=user_id,
                 sql_query=sql_query,
@@ -247,7 +236,6 @@ def execute_sql(user_id, sql_query):
                 "summary": summary
             }
 
-        # -------------------- DELETE --------------------
         elif sql_upper.startswith("DELETE"):
             cursor = conn.cursor()
             cursor.execute(sql_query)
@@ -258,7 +246,6 @@ def execute_sql(user_id, sql_query):
             conn.close()
 
             file_path = _save_modified_file(df_updated, user_id, store["source_type"])
-
             summary = _generate_summary(
                 user_id=user_id,
                 sql_query=sql_query,
@@ -274,7 +261,6 @@ def execute_sql(user_id, sql_query):
                 "summary": summary
             }
 
-        # -------------------- INSERT --------------------
         elif sql_upper.startswith("INSERT"):
             cursor = conn.cursor()
             cursor.execute(sql_query)
@@ -284,7 +270,6 @@ def execute_sql(user_id, sql_query):
             conn.close()
 
             file_path = _save_modified_file(df_updated, user_id, store["source_type"])
-
             summary = _generate_summary(
                 user_id=user_id,
                 sql_query=sql_query,
@@ -309,8 +294,6 @@ def execute_sql(user_id, sql_query):
         raise ValueError(f"SQL execution error: {str(e)}")
 
 
-# -------------------- SAVE MODIFIED FILE --------------------
-
 def _save_modified_file(df, user_id, source_type):
     """Save modified DataFrame back to original format"""
     if source_type in ["csv", "sqlite", "postgres"]:
@@ -322,11 +305,8 @@ def _save_modified_file(df, user_id, source_type):
     else:
         file_path = os.path.join(MODIFIED_DIR, f"{user_id}_modified.csv")
         df.to_csv(file_path, index=False)
-
     return file_path
 
-
-# -------------------- USER FRIENDLY SUMMARY --------------------
 
 def _generate_summary(user_id, sql_query, operation, result_df=None, affected_rows=None):
     """Generate plain English summary of SQL result using LLM"""
@@ -336,7 +316,6 @@ def _generate_summary(user_id, sql_query, operation, result_df=None, affected_ro
             if row_count == 0:
                 data_preview = "No rows returned."
             else:
-                # Send first 5 rows as preview
                 preview = result_df.head(5).to_string(index=False)
                 data_preview = f"{row_count} rows returned. Preview:\n{preview}"
 
@@ -366,14 +345,11 @@ Write a plain English summary of what was done:"""
         return response.choices[0].message.content.strip()
 
     except Exception:
-        # Fallback summary without LLM
         if operation == "SELECT":
             return f"Found {len(result_df)} records matching your query."
         else:
             return f"{operation} operation completed. {affected_rows} row(s) affected."
 
-
-# -------------------- GET TABLE INFO --------------------
 
 def get_table_info(user_id):
     """Get current table info for a user"""

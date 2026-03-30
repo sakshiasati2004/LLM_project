@@ -14,6 +14,8 @@ for key, default in {
     "renaming_session": None,
     "sql_file_uploaded": False,
     "sql_table_info": None,
+    "sql_results": [],
+    "sql_file_key": None,  # ✅ Track uploaded SQL file
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -165,7 +167,6 @@ with tab1:
             for d in session_docs:
                 st.caption(f"• {d}")
 
-        # ✅ UPDATED: JavaScript inject to force browser to show .msg files in file picker
         st.markdown("""
             <script>
             const interval = setInterval(() => {
@@ -184,7 +185,6 @@ with tab1:
         )
 
         if uploaded_file:
-
             allowed_ext = ["pdf", "txt", "doc", "docx", "msg", "chm"]
             file_ext = uploaded_file.name.split(".")[-1].lower()
 
@@ -257,3 +257,132 @@ with tab1:
                 st.error("⚠️ Server error. Please try again.")
 
             st.rerun()
+
+
+# =========================================================
+# ==================== TAB 2: NL2SQL ======================
+# =========================================================
+with tab2:
+    st.title("🧮 NL2SQL Assistant")
+
+    col1, col2 = st.columns([1, 3])
+
+    # -------------------- LEFT: Upload + Table Info --------------------
+    with col1:
+        st.subheader("📂 Upload Data File")
+
+        sql_file = st.file_uploader(
+            "Upload CSV / Excel / SQLite",
+            type=["csv", "xlsx", "xls", "db"]
+        )
+
+        if sql_file:
+            file_key = f"{sql_file.name}_{sql_file.size}"
+
+            # ✅ Only upload if not already uploaded
+            if st.session_state.sql_file_key != file_key:
+                with st.spinner("Processing..."):
+                    res = requests.post(
+                        f"{API_URL}/upload_sql",
+                        headers=headers,
+                        files={"file": (sql_file.name, sql_file, sql_file.type)}
+                    )
+                if res.status_code == 200:
+                    data = res.json()
+                    st.session_state.sql_file_uploaded = True
+                    st.session_state.sql_table_info = data
+                    st.session_state.sql_results = []
+                    st.session_state.sql_file_key = file_key  # ✅ Track file
+                    st.success("Uploaded ✅")
+                else:
+                    st.error(res.json().get("detail", "Upload failed"))
+            else:
+                st.success("✅ File already loaded")
+
+        # ✅ Show Table Info
+        if st.session_state.sql_table_info:
+            st.markdown("---")
+            st.subheader("📊 Table Info")
+            info = st.session_state.sql_table_info
+            st.write(f"**Table:** `{info.get('table_name', '')}`")
+            cols = info.get('columns', [])
+            st.write(f"**Columns ({len(cols)}):**")
+            for col in cols:
+                st.caption(f"• {col}")
+
+    # -------------------- RIGHT: Query + Results --------------------
+    with col2:
+        st.subheader("💬 Ask SQL Queries")
+
+        if not st.session_state.sql_file_uploaded:
+            st.info("👈 Upload a CSV, Excel, or SQLite file first")
+        else:
+            # ✅ Show query history
+            for result in st.session_state.sql_results:
+                with st.container():
+                    with st.chat_message("user"):
+                        st.write(result["question"])
+
+                    with st.chat_message("assistant"):
+                        # ✅ 1. Show SQL
+                        st.markdown("**🧠 Generated SQL:**")
+                        st.code(result["sql"], language="sql")
+
+                        # ✅ 2. Show summary
+                        if result.get("summary"):
+                            st.info(f"💬 {result['summary']}")
+
+                        # ✅ 3. Show table for SELECT
+                        if result["type"] == "select":
+                            if result["records"]:
+                                st.markdown(f"**📊 Results ({result['row_count']} rows):**")
+                                df = pd.DataFrame(result["records"])
+                                st.dataframe(df, use_container_width=True)
+
+                                # ✅ Download as CSV
+                                csv = df.to_csv(index=False)
+                                st.download_button(
+                                    "⬇️ Download Results as CSV",
+                                    csv,
+                                    file_name="query_results.csv",
+                                    mime="text/csv",
+                                    key=f"download_{result['id']}"
+                                )
+                            else:
+                                st.warning("No records found matching your query.")
+
+                    st.markdown("---")
+
+            # ✅ Query input
+            query = st.chat_input(
+                "Ask like: show rows where gender is female / show top 5 salaries..."
+            )
+
+            if query:
+                with st.spinner("Generating SQL and fetching results..."):
+                    res = requests.post(
+                        f"{API_URL}/query_sql",
+                        headers=headers,
+                        json={"message": query}
+                    )
+
+                if res.status_code == 200:
+                    data = res.json()
+
+                    result_obj = {
+                        "id": len(st.session_state.sql_results),
+                        "question": query,
+                        "sql": data.get("sql_query", ""),
+                        "summary": data.get("summary", ""),
+                        "type": data.get("type", ""),
+                        "records": data.get("data", []),
+                        "columns": data.get("columns", []),
+                        "row_count": data.get("row_count", 0),
+                    }
+
+                    st.session_state.sql_results.append(result_obj)
+                    st.rerun()
+
+                else:
+                    err = res.json().get("detail", "Query failed")
+                    st.error(f"❌ {err}")

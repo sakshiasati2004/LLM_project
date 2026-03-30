@@ -19,3 +19,8 @@ faiss_index_*/
 faiss_indexes/
 faiss_index/
 faiss_index_*/
+
+*.db
+data/nl2sql_dbs/
+faiss_indexes/
+__pycache__/
