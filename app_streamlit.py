@@ -15,7 +15,8 @@ for key, default in {
     "sql_file_uploaded": False,
     "sql_table_info": None,
     "sql_results": [],
-    "sql_file_key": None,  # ✅ Track uploaded SQL file
+    "sql_file_key": None,
+    "sql_pending_query": None,  # ✅ ADDED: fix question disappearing
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -265,6 +266,26 @@ with tab1:
 with tab2:
     st.title("🧮 NL2SQL Assistant")
 
+    # ✅ ADDED: NL2SQL sidebar with chat history
+    with st.sidebar:
+        st.markdown("---")
+        st.title("🧮 NL2SQL History")
+
+        res_hist = requests.get(f"{API_URL}/history_sql", headers=headers)
+        sql_history = res_hist.json().get("history", []) if res_hist.status_code == 200 else []
+
+        if not sql_history:
+            st.caption("No queries yet")
+        else:
+            for item in sql_history:
+                with st.expander(f"🔍 {item['question'][:40]}..."):
+                    st.caption(f"🕐 {item['timestamp']}")
+                    st.code(item["sql_query"], language="sql")
+                    if item.get("summary"):
+                        st.info(item["summary"])
+                    if item["result_type"] == "select":
+                        st.caption(f"📊 {item['row_count']} rows returned")
+
     col1, col2 = st.columns([1, 3])
 
     # -------------------- LEFT: Upload + Table Info --------------------
@@ -279,7 +300,6 @@ with tab2:
         if sql_file:
             file_key = f"{sql_file.name}_{sql_file.size}"
 
-            # ✅ Only upload if not already uploaded
             if st.session_state.sql_file_key != file_key:
                 with st.spinner("Processing..."):
                     res = requests.post(
@@ -292,14 +312,13 @@ with tab2:
                     st.session_state.sql_file_uploaded = True
                     st.session_state.sql_table_info = data
                     st.session_state.sql_results = []
-                    st.session_state.sql_file_key = file_key  # ✅ Track file
+                    st.session_state.sql_file_key = file_key
                     st.success("Uploaded ✅")
                 else:
                     st.error(res.json().get("detail", "Upload failed"))
             else:
                 st.success("✅ File already loaded")
 
-        # ✅ Show Table Info
         if st.session_state.sql_table_info:
             st.markdown("---")
             st.subheader("📊 Table Info")
@@ -317,29 +336,25 @@ with tab2:
         if not st.session_state.sql_file_uploaded:
             st.info("👈 Upload a CSV, Excel, or SQLite file first")
         else:
-            # ✅ Show query history
+            # ✅ Show query history from session state
             for result in st.session_state.sql_results:
                 with st.container():
                     with st.chat_message("user"):
                         st.write(result["question"])
 
                     with st.chat_message("assistant"):
-                        # ✅ 1. Show SQL
                         st.markdown("**🧠 Generated SQL:**")
                         st.code(result["sql"], language="sql")
 
-                        # ✅ 2. Show summary
                         if result.get("summary"):
                             st.info(f"💬 {result['summary']}")
 
-                        # ✅ 3. Show table for SELECT
                         if result["type"] == "select":
                             if result["records"]:
                                 st.markdown(f"**📊 Results ({result['row_count']} rows):**")
                                 df = pd.DataFrame(result["records"])
                                 st.dataframe(df, use_container_width=True)
 
-                                # ✅ Download as CSV
                                 csv = df.to_csv(index=False)
                                 st.download_button(
                                     "⬇️ Download Results as CSV",
@@ -353,25 +368,21 @@ with tab2:
 
                     st.markdown("---")
 
-            # ✅ Query input
-            query = st.chat_input(
-                "Ask like: show rows where gender is female / show top 5 salaries..."
-            )
-
-            if query:
+            # ✅ ADDED: Show pending query immediately to fix disappearing question
+            if st.session_state.sql_pending_query:
+                with st.chat_message("user"):
+                    st.write(st.session_state.sql_pending_query)
                 with st.spinner("Generating SQL and fetching results..."):
                     res = requests.post(
                         f"{API_URL}/query_sql",
                         headers=headers,
-                        json={"message": query}
+                        json={"message": st.session_state.sql_pending_query}
                     )
-
                 if res.status_code == 200:
                     data = res.json()
-
                     result_obj = {
                         "id": len(st.session_state.sql_results),
-                        "question": query,
+                        "question": st.session_state.sql_pending_query,
                         "sql": data.get("sql_query", ""),
                         "summary": data.get("summary", ""),
                         "type": data.get("type", ""),
@@ -379,10 +390,19 @@ with tab2:
                         "columns": data.get("columns", []),
                         "row_count": data.get("row_count", 0),
                     }
-
                     st.session_state.sql_results.append(result_obj)
-                    st.rerun()
-
                 else:
                     err = res.json().get("detail", "Query failed")
                     st.error(f"❌ {err}")
+                st.session_state.sql_pending_query = None
+                st.rerun()
+
+            # ✅ Query input
+            query = st.chat_input(
+                "Ask like: show rows where gender is female / show top 5 salaries..."
+            )
+
+            # ✅ UPDATED: Store query in session state first, then rerun to show it immediately
+            if query:
+                st.session_state.sql_pending_query = query
+                st.rerun()

@@ -52,6 +52,20 @@ def create_tables():
         )
         """)
 
+        # ✅ ADDED: NL2SQL chat history table
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sql_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            question TEXT,
+            sql_query TEXT,
+            summary TEXT,
+            result_type TEXT,
+            row_count INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
 
 # -------------------- AUTH --------------------
 def register_user(username, password):
@@ -74,10 +88,10 @@ def login_user(username, password):
         user = cursor.fetchone()
 
     if not user:
-        return "not_found"       # ✅ User doesn't exist
+        return "not_found"
     if not verify_password(password, user[2]):
-        return "wrong_password"  # ✅ Wrong password
-    return user                  # ✅ Success
+        return "wrong_password"
+    return user
 
 
 # -------------------- SESSION --------------------
@@ -162,3 +176,40 @@ def delete_session(session_id):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
         cursor.execute("DELETE FROM chat_sessions WHERE id=?", (session_id,))
+
+
+# -------------------- NL2SQL HISTORY --------------------
+# ✅ ADDED: Save NL2SQL query to DB
+def save_sql_message(user_id, question, sql_query, summary, result_type, row_count):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO sql_messages
+            (user_id, question, sql_query, summary, result_type, row_count)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, question, sql_query, summary, result_type, row_count)
+        )
+
+
+# ✅ ADDED: Get NL2SQL history from DB
+def get_sql_history(user_id):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT question, sql_query, summary, result_type, row_count, timestamp
+            FROM sql_messages WHERE user_id=?
+            ORDER BY id DESC LIMIT 20""",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+    return [
+        {
+            "question": r[0],
+            "sql_query": r[1],
+            "summary": r[2],
+            "result_type": r[3],
+            "row_count": r[4],
+            "timestamp": r[5]
+        }
+        for r in rows
+    ]

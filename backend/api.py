@@ -18,7 +18,8 @@ from backend.db import (
     create_chat_session, get_chat_history,
     get_user_sessions, rename_session,
     delete_session, create_tables,
-    verify_session_ownership
+    verify_session_ownership,
+    save_sql_message, get_sql_history  # ✅ ADDED
 )
 
 from backend.auth import create_access_token, get_current_user
@@ -34,6 +35,10 @@ from backend.rag import (
 
 UPLOAD_DIR = "temp_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# ✅ ADDED: Permanent folder for NL2SQL uploaded files
+SQL_UPLOAD_DIR = "sql_uploads"
+os.makedirs(SQL_UPLOAD_DIR, exist_ok=True)
 
 app = FastAPI()
 create_tables()
@@ -174,7 +179,6 @@ def upload_file(
     if not verify_session_ownership(session_id, user_id):
         raise HTTPException(status_code=403, detail="Unauthorized ❌")
 
-    # ✅ ADDED: explicit file type validation with clear error message
     allowed_extensions = {"pdf", "txt", "doc", "docx", "msg", "chm"}
     file_ext = file.filename.rsplit(".", 1)[-1].lower()
     if file_ext not in allowed_extensions:
@@ -210,12 +214,19 @@ def upload_sql_file(
     file: UploadFile = File(...),
     user_id: str = Depends(get_current_user)
 ):
+    # ✅ ADDED: Save original file permanently in sql_uploads/
+    permanent_filename = f"{user_id}_{file.filename}"
+    permanent_path = os.path.join(SQL_UPLOAD_DIR, permanent_filename)
+
     filename = f"{user_id}_{uuid.uuid4()}_{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, filename)
 
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
+        # ✅ ADDED: Also save a permanent copy
+        shutil.copy2(file_path, permanent_path)
 
         table_name, columns = load_file(file_path, user_id)
 
@@ -266,9 +277,26 @@ def query_sql(
     try:
         sql_query = generate_sql(user_id, req.message)
         result = execute_sql(user_id, sql_query)
+
+        # ✅ ADDED: Save NL2SQL query to DB history
+        save_sql_message(
+            user_id=user_id,
+            question=req.message,
+            sql_query=sql_query,
+            summary=result.get("summary", ""),
+            result_type=result.get("type", ""),
+            row_count=result.get("row_count", 0)
+        )
+
         return {"sql_query": sql_query, **result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ✅ ADDED: NL2SQL history endpoint
+@app.get("/history_sql")
+def get_sql_history_api(user_id: str = Depends(get_current_user)):
+    return {"history": get_sql_history(user_id)}
 
 
 @app.get("/download_sql")
