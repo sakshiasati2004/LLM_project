@@ -19,7 +19,7 @@ FAISS_BASE_DIR = os.path.join(
 os.makedirs(FAISS_BASE_DIR, exist_ok=True)
 
 
-# -------------------- DOCUMENT LOADERS --------------------
+# -------------------- EXISTING LOADERS (NOT CHANGED) --------------------
 
 def load_msg_file(file_path):
     """Load .msg (Outlook email) files"""
@@ -29,7 +29,6 @@ def load_msg_file(file_path):
 
         msg = extract_msg.Message(file_path)
 
-        # ✅ Try plain body first, then HTML body as fallback
         body = msg.body
         if not body or not body.strip():
             if msg.htmlBody:
@@ -39,7 +38,6 @@ def load_msg_file(file_path):
                 soup = BeautifulSoup(html, "html.parser")
                 body = soup.get_text(separator="\n").strip()
 
-        # ✅ Clean null characters from subject
         subject = msg.subject.replace('\x00', '').strip() if msg.subject else ''
 
         content = f"""Subject: {subject}
@@ -85,25 +83,206 @@ def load_chm_file(file_path):
         raise ValueError(f"Error loading .chm file: {str(e)}")
 
 
+# -------------------- NEW LOADERS --------------------
+
+def extract_text_from_image(image):
+    """✅ Extract text from a PIL image using Tesseract OCR"""
+    try:
+        import pytesseract
+        text = pytesseract.image_to_string(image)
+        return text.strip()
+    except Exception as e:
+        return ""
+
+
+def load_image_file(file_path):
+    """✅ Load standalone image files (JPEG, PNG) using Tesseract OCR"""
+    try:
+        from PIL import Image
+        import pytesseract
+
+        image = Image.open(file_path)
+        text = pytesseract.image_to_string(image).strip()
+
+        if not text:
+            text = "No readable text found in this image."
+
+        return [Document(
+            page_content=text,
+            metadata={"source": file_path}
+        )]
+    except Exception as e:
+        raise ValueError(f"Error loading image file: {str(e)}")
+
+
+def load_pdf_with_images(file_path):
+    """✅ Load PDF — extract both text and images (OCR on embedded images)"""
+    try:
+        import fitz  # pymupdf
+        from PIL import Image
+        import io
+
+        documents = []
+        pdf = fitz.open(file_path)
+
+        for page_num in range(len(pdf)):
+            page = pdf[page_num]
+
+            # ✅ Extract normal text
+            text = page.get_text().strip()
+            if text:
+                documents.append(Document(
+                    page_content=text,
+                    metadata={"source": file_path, "page": page_num}
+                ))
+
+            # ✅ Extract images from page and run OCR
+            image_list = page.get_images(full=True)
+            for img_index, img in enumerate(image_list):
+                xref = img[0]
+                base_image = pdf.extract_image(xref)
+                image_bytes = base_image["image"]
+
+                image = Image.open(io.BytesIO(image_bytes))
+                ocr_text = extract_text_from_image(image)
+
+                if ocr_text and len(ocr_text) > 10:
+                    documents.append(Document(
+                        page_content=ocr_text,
+                        metadata={
+                            "source": file_path,
+                            "page": page_num,
+                            "type": "image_ocr"
+                        }
+                    ))
+
+        pdf.close()
+        return documents if documents else PyPDFLoader(file_path).load()
+
+    except Exception as e:
+        # ✅ Fallback to normal PDF loader if pymupdf fails
+        return PyPDFLoader(file_path).load()
+
+
+def load_docx_with_images(file_path):
+    """✅ Load DOCX — extract both text and images (OCR on embedded images)"""
+    try:
+        from docx import Document as DocxDocument
+        from PIL import Image
+        import io
+
+        doc = DocxDocument(file_path)
+        documents = []
+
+        # ✅ Extract normal text
+        full_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        if full_text:
+            documents.append(Document(
+                page_content=full_text,
+                metadata={"source": file_path}
+            ))
+
+        # ✅ Extract images from DOCX and run OCR
+        for rel in doc.part.rels.values():
+            if "image" in rel.reltype:
+                image_part = rel.target_part
+                image_bytes = image_part.blob
+                try:
+                    image = Image.open(io.BytesIO(image_bytes))
+                    ocr_text = extract_text_from_image(image)
+                    if ocr_text and len(ocr_text) > 10:
+                        documents.append(Document(
+                            page_content=ocr_text,
+                            metadata={
+                                "source": file_path,
+                                "type": "image_ocr"
+                            }
+                        ))
+                except Exception:
+                    continue
+
+        return documents if documents else UnstructuredWordDocumentLoader(file_path).load()
+
+    except Exception as e:
+        # ✅ Fallback to normal DOCX loader if fails
+        return UnstructuredWordDocumentLoader(file_path).load()
+
+
+def load_ppt_file(file_path):
+    """✅ Load PPT/PPTX — extract text from slides + OCR on slide images"""
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches
+        from PIL import Image
+        import io
+
+        prs = Presentation(file_path)
+        documents = []
+
+        for slide_num, slide in enumerate(prs.slides):
+            slide_text = []
+
+            # ✅ Extract text from all shapes
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text.strip()
+                        if text:
+                            slide_text.append(text)
+
+                # ✅ Extract images from shapes and run OCR
+                if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
+                    try:
+                        image_bytes = shape.image.blob
+                        image = Image.open(io.BytesIO(image_bytes))
+                        ocr_text = extract_text_from_image(image)
+                        if ocr_text and len(ocr_text) > 10:
+                            slide_text.append(f"[Image Text]: {ocr_text}")
+                    except Exception:
+                        continue
+
+            if slide_text:
+                documents.append(Document(
+                    page_content="\n".join(slide_text),
+                    metadata={
+                        "source": file_path,
+                        "slide": slide_num + 1
+                    }
+                ))
+
+        return documents if documents else []
+
+    except Exception as e:
+        raise ValueError(f"Error loading PPT file: {str(e)}")
+
+
+# -------------------- LOAD DOCUMENT (UPDATED) --------------------
+
 def load_document(file_path):
     """Load document based on file extension"""
     ext = os.path.splitext(file_path)[1].lower()
 
     if ext == ".pdf":
-        return PyPDFLoader(file_path).load()
+        return load_pdf_with_images(file_path)          # ✅ Updated — now extracts images too
     elif ext == ".txt":
         return TextLoader(file_path).load()
     elif ext == ".csv":
         return CSVLoader(file_path).load()
     elif ext in [".doc", ".docx"]:
-        return UnstructuredWordDocumentLoader(file_path).load()
+        return load_docx_with_images(file_path)          # ✅ Updated — now extracts images too
     elif ext == ".msg":
         return load_msg_file(file_path)
     elif ext == ".chm":
         return load_chm_file(file_path)
+    elif ext in [".jpg", ".jpeg", ".png"]:
+        return load_image_file(file_path)                # ✅ NEW — standalone images
+    elif ext in [".ppt", ".pptx"]:
+        return load_ppt_file(file_path)                  # ✅ NEW — PPT/PPTX
     else:
         raise ValueError(f"Unsupported file type: {ext}")
 
+
+# -------------------- REST — NOT CHANGED --------------------
 
 def load_and_split(file_path):
     documents = load_document(file_path)
@@ -113,7 +292,6 @@ def load_and_split(file_path):
     )
     chunks = splitter.split_documents(documents)
 
-    # ✅ NEW: Filter out empty/invalid chunks that break embeddings
     valid_chunks = []
     for chunk in chunks:
         content = chunk.page_content.strip()
@@ -121,7 +299,6 @@ def load_and_split(file_path):
             continue
         if len(content) < 10:
             continue
-        # ✅ Clean binary/special characters
         chunk.page_content = content.encode('utf-8', errors='ignore').decode('utf-8')
         valid_chunks.append(chunk)
 

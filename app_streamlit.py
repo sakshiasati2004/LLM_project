@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-import speech_recognition as sr  # ✅ ADDED: for mic input
+import speech_recognition as sr
 
 API_URL = "http://127.0.0.1:8000"
 st.set_page_config(layout="wide", page_title="RAG + NL2SQL Chatbot")
@@ -18,8 +18,8 @@ for key, default in {
     "sql_results": [],
     "sql_file_key": None,
     "sql_pending_query": None,
-    "mic_text": "",           # ✅ ADDED: stores transcribed speech text
-    "mic_listening": False,   # ✅ ADDED: tracks mic state
+    "mic_text": "",
+    "mic_listening": False,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -176,20 +176,22 @@ with tab1:
             const interval = setInterval(() => {
                 const input = document.querySelector('input[type="file"]');
                 if (input) {
-                    input.setAttribute('accept', '.pdf,.txt,.doc,.docx,.msg,.chm,application/vnd.ms-outlook');
+                    input.setAttribute('accept', '.pdf,.txt,.doc,.docx,.msg,.chm,.jpg,.jpeg,.png,.ppt,.pptx,application/vnd.ms-outlook');
                     clearInterval(interval);
                 }
             }, 300);
             </script>
         """, unsafe_allow_html=True)
 
+        # ✅ UPDATED: added jpg, jpeg, png, ppt, pptx
         uploaded_file = st.file_uploader(
-            "Upload file (PDF, TXT, DOC, DOCX, MSG, CHM) — 💡 If .msg not visible, select 'All Files' in file picker",
-            type=["pdf", "txt", "doc", "docx", "msg", "chm"]
+            "Upload file (PDF, TXT, DOC, DOCX, MSG, CHM, JPG, PNG, PPT, PPTX)",
+            type=["pdf", "txt", "doc", "docx", "msg", "chm", "jpg", "jpeg", "png", "ppt", "pptx"]
         )
 
         if uploaded_file:
-            allowed_ext = ["pdf", "txt", "doc", "docx", "msg", "chm"]
+            # ✅ UPDATED: added jpg, jpeg, png, ppt, pptx
+            allowed_ext = ["pdf", "txt", "doc", "docx", "msg", "chm", "jpg", "jpeg", "png", "ppt", "pptx"]
             file_ext = uploaded_file.name.split(".")[-1].lower()
 
             if file_ext not in allowed_ext:
@@ -232,23 +234,18 @@ with tab1:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
 
-        # ✅ ADDED: Mic input section — above existing chat_input
         mic_col, _ = st.columns([1, 3])
         with mic_col:
-            # ✅ Mic button — toggles listening state
             mic_label = "🔴 Stop Listening" if st.session_state.mic_listening else "🎤 Speak"
             if st.button(mic_label, key="mic_button"):
                 if not st.session_state.mic_listening:
-                    # ✅ Start listening
                     st.session_state.mic_listening = True
                     st.session_state.mic_text = ""
                     st.rerun()
                 else:
-                    # ✅ Stop listening
                     st.session_state.mic_listening = False
                     st.rerun()
 
-        # ✅ When mic is active — capture audio and transcribe
         if st.session_state.mic_listening:
             st.info("🎤 Listening... Please speak now")
             try:
@@ -273,7 +270,6 @@ with tab1:
                 st.error(f"Mic error: {str(e)}")
                 st.rerun()
 
-        # ✅ Show transcribed text in editable box with Send button
         if st.session_state.mic_text:
             st.markdown("**🗣️ Transcribed — edit if needed:**")
             edited_text = st.text_area(
@@ -306,11 +302,9 @@ with tab1:
                                 st.caption(f"📄 Source: {', '.join(sources)}")
                     else:
                         st.error("⚠️ Server error. Please try again.")
-                    # ✅ Clear mic text after sending
                     st.session_state.mic_text = ""
                     st.rerun()
 
-        # ✅ Existing chat input — completely unchanged
         user_input = st.chat_input("Ask anything...")
 
         if user_input:
