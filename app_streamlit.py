@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import speech_recognition as sr  # ✅ ADDED: for mic input
 
 API_URL = "http://127.0.0.1:8000"
 st.set_page_config(layout="wide", page_title="RAG + NL2SQL Chatbot")
@@ -16,7 +17,9 @@ for key, default in {
     "sql_table_info": None,
     "sql_results": [],
     "sql_file_key": None,
-    "sql_pending_query": None,  # ✅ ADDED: fix question disappearing
+    "sql_pending_query": None,
+    "mic_text": "",           # ✅ ADDED: stores transcribed speech text
+    "mic_listening": False,   # ✅ ADDED: tracks mic state
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -229,6 +232,85 @@ with tab1:
             with st.chat_message(msg["role"]):
                 st.write(msg["content"])
 
+        # ✅ ADDED: Mic input section — above existing chat_input
+        mic_col, _ = st.columns([1, 3])
+        with mic_col:
+            # ✅ Mic button — toggles listening state
+            mic_label = "🔴 Stop Listening" if st.session_state.mic_listening else "🎤 Speak"
+            if st.button(mic_label, key="mic_button"):
+                if not st.session_state.mic_listening:
+                    # ✅ Start listening
+                    st.session_state.mic_listening = True
+                    st.session_state.mic_text = ""
+                    st.rerun()
+                else:
+                    # ✅ Stop listening
+                    st.session_state.mic_listening = False
+                    st.rerun()
+
+        # ✅ When mic is active — capture audio and transcribe
+        if st.session_state.mic_listening:
+            st.info("🎤 Listening... Please speak now")
+            try:
+                recognizer = sr.Recognizer()
+                with sr.Microphone() as source:
+                    recognizer.adjust_for_ambient_noise(source, duration=1)
+                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=15)
+                text = recognizer.recognize_google(audio)
+                st.session_state.mic_text = text
+                st.session_state.mic_listening = False
+                st.rerun()
+            except sr.WaitTimeoutError:
+                st.session_state.mic_listening = False
+                st.warning("⏱️ No speech detected. Please try again.")
+                st.rerun()
+            except sr.UnknownValueError:
+                st.session_state.mic_listening = False
+                st.warning("❓ Could not understand. Please try again.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.mic_listening = False
+                st.error(f"Mic error: {str(e)}")
+                st.rerun()
+
+        # ✅ Show transcribed text in editable box with Send button
+        if st.session_state.mic_text:
+            st.markdown("**🗣️ Transcribed — edit if needed:**")
+            edited_text = st.text_area(
+                "Edit your query",
+                value=st.session_state.mic_text,
+                key="mic_edit_box",
+                label_visibility="collapsed"
+            )
+            if st.button("📨 Send", key="mic_send_button"):
+                if edited_text.strip():
+                    with st.chat_message("user"):
+                        st.write(edited_text)
+                    with st.spinner("Thinking..."):
+                        res = requests.post(
+                            f"{API_URL}/chat",
+                            headers=headers,
+                            json={
+                                "session_id": st.session_state.session_id,
+                                "message": edited_text,
+                                "selected_doc": st.session_state.selected_doc
+                            }
+                        )
+                    if res.status_code == 200:
+                        data = res.json()
+                        response = data.get("response", "")
+                        sources = data.get("sources", [])
+                        with st.chat_message("assistant"):
+                            st.write(response)
+                            if sources:
+                                st.caption(f"📄 Source: {', '.join(sources)}")
+                    else:
+                        st.error("⚠️ Server error. Please try again.")
+                    # ✅ Clear mic text after sending
+                    st.session_state.mic_text = ""
+                    st.rerun()
+
+        # ✅ Existing chat input — completely unchanged
         user_input = st.chat_input("Ask anything...")
 
         if user_input:
@@ -266,7 +348,6 @@ with tab1:
 with tab2:
     st.title("🧮 NL2SQL Assistant")
 
-    # ✅ ADDED: NL2SQL sidebar with chat history
     with st.sidebar:
         st.markdown("---")
         st.title("🧮 NL2SQL History")
@@ -288,7 +369,6 @@ with tab2:
 
     col1, col2 = st.columns([1, 3])
 
-    # -------------------- LEFT: Upload + Table Info --------------------
     with col1:
         st.subheader("📂 Upload Data File")
 
@@ -329,14 +409,12 @@ with tab2:
             for col in cols:
                 st.caption(f"• {col}")
 
-    # -------------------- RIGHT: Query + Results --------------------
     with col2:
         st.subheader("💬 Ask SQL Queries")
 
         if not st.session_state.sql_file_uploaded:
             st.info("👈 Upload a CSV, Excel, or SQLite file first")
         else:
-            # ✅ Show query history from session state
             for result in st.session_state.sql_results:
                 with st.container():
                     with st.chat_message("user"):
@@ -368,7 +446,6 @@ with tab2:
 
                     st.markdown("---")
 
-            # ✅ ADDED: Show pending query immediately to fix disappearing question
             if st.session_state.sql_pending_query:
                 with st.chat_message("user"):
                     st.write(st.session_state.sql_pending_query)
@@ -397,12 +474,10 @@ with tab2:
                 st.session_state.sql_pending_query = None
                 st.rerun()
 
-            # ✅ Query input
             query = st.chat_input(
                 "Ask like: show rows where gender is female / show top 5 salaries..."
             )
 
-            # ✅ UPDATED: Store query in session state first, then rerun to show it immediately
             if query:
                 st.session_state.sql_pending_query = query
                 st.rerun()
