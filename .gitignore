@@ -23,4 +23,5 @@ faiss_index_*/
 *.db
 data/nl2sql_dbs/
 faiss_indexes/
-__pycache__/
+__pycache__/sql_uploads/
+tests/
