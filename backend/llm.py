@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ✅ Validate API key at startup — fail loud, not silent
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY is not set in .env file!")
@@ -31,10 +30,7 @@ def llm_call(messages: list) -> str:
 
 
 def generate_chat_title(first_message: str) -> str:
-    """
-    ✅ Generates a short ChatGPT-style title from the first user message.
-    Called only once — when the first message is sent in a new session.
-    """
+    
     try:
         response = client.chat.completions.create(
             model="openai/gpt-4o-mini",
@@ -57,12 +53,12 @@ def generate_chat_title(first_message: str) -> str:
         )
         title = response.choices[0].message.content.strip()
 
-        # ✅ Fallback if LLM returns empty or too long
+        # Fallback if LLM returns empty or too long
         if not title or len(title) > 60:
             return " ".join(first_message.split()[:5])
 
         return title
 
     except Exception:
-        # ✅ Safe fallback — never crash the chat just for a title
+        # Safe fallback — never crash the chat just for a title
         return " ".join(first_message.split()[:5])

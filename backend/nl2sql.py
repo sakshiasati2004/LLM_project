@@ -19,7 +19,6 @@ os.makedirs(MODIFIED_DIR, exist_ok=True)
 
 
 def _clean_table_name(name):
-    """✅ Clean table name — remove all special characters"""
     name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
     name = name.strip('_')
     if name and name[0].isdigit():
@@ -116,7 +115,6 @@ def load_postgres(connection_string, user_id):
 
 def _save_to_sqlite(df, table_name, user_id):
     """Save DataFrame to user-specific SQLite DB"""
-    # ✅ Clean table name before saving
     table_name = _clean_table_name(table_name)
     db_path = os.path.join(MODIFIED_DIR, f"{user_id}_data.db")
     conn = sqlite3.connect(db_path)
@@ -138,6 +136,83 @@ def _copy_db(file_path, user_id):
     return db_path
 
 
+# -------------------- STANDALONE QUESTION HELPERS (NL2SQL) --------------------
+
+def _sql_is_context_dependent(user_message: str, last_question: str) -> bool:
+    """
+    Ask LLM whether the new NL2SQL message depends on prior question context.
+    Returns True if it does, False if it is already standalone.
+    """
+    prompt = (
+        f"Previous question: \"{last_question}\"\n"
+        f"New question: \"{user_message}\"\n\n"
+        "Does the new question depend on the previous question to be fully understood? "
+        "For example: follow-up queries, references like 'same filter', 'those records', "
+        "'now sort by', 'also show', 'instead', 'add a condition for', etc.\n"
+        "Reply with only YES or NO."
+    )
+    try:
+        response = client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=5,
+            temperature=0
+        )
+        result = response.choices[0].message.content.strip().upper()
+        return result.startswith("YES")
+    except Exception:
+        return False
+
+
+def _sql_rewrite_standalone(user_message: str, last_question: str) -> str:
+    """
+    Use LLM to rewrite a context-dependent NL2SQL message into a fully standalone question.
+    """
+    prompt = (
+        f"Previous question: \"{last_question}\"\n"
+        f"Follow-up question: \"{user_message}\"\n\n"
+        "Rewrite the follow-up as a fully standalone data query that can be understood "
+        "without any reference to the previous question. "
+        "Reply with ONLY the rewritten question, nothing else."
+    )
+    try:
+        response = client.chat.completions.create(
+            model="openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=100,
+            temperature=0
+        )
+        result = response.choices[0].message.content.strip()
+        return result if result else user_message
+    except Exception:
+        return user_message
+
+
+def get_sql_standalone_question(user_message: str, sql_history: list):
+    """
+    Main logic for NL2SQL standalone question rewriting:
+    - If no history → first query, always standalone, return None
+    - If history exists → ask LLM if context-dependent
+        - YES → rewrite and return standalone question
+        - NO  → return None (original is already standalone)
+    sql_history is a list of dicts with at least a 'question' key (from get_sql_history).
+    """
+    if not sql_history:
+        return None
+
+    # Last question asked by this user in NL2SQL
+    last_question = sql_history[0].get("question", "")
+    if not last_question:
+        return None
+
+    if _sql_is_context_dependent(user_message, last_question):
+        return _sql_rewrite_standalone(user_message, last_question)
+
+    return None
+
+
+# -------------------- EXISTING FUNCTIONS (UNCHANGED) --------------------
+
 def generate_sql(user_id, user_message):
     """Generate SQL from natural language using LLM"""
     if user_id not in user_data_store:
@@ -147,22 +222,27 @@ def generate_sql(user_id, user_message):
     table_name = store["table_name"]
     columns = store["columns"]
 
+    # ✅ FIX: Wrap each column name in double quotes so the LLM sees exactly
+    # how they should appear in the query — handles spaces, slashes, special chars
+    quoted_columns = ', '.join([f'"{col}"' for col in columns])
+
     prompt = f"""You are an expert SQL query generator.
 
-Table name: {table_name}
-Columns: {', '.join(columns)}
+Table name: "{table_name}"
+Columns: {quoted_columns}
 
 User request: {user_message}
 
 Rules:
 1. Generate a valid SQLite SQL query
-2. Use the exact table name: {table_name}
-3. Use the exact column names provided
-4. For SELECT queries, use appropriate WHERE, ORDER BY, LIMIT clauses
-5. For UPDATE queries, always include a WHERE clause
-6. For DELETE queries, always include a WHERE clause
-7. For INSERT queries, include all required columns
-8. Return ONLY the SQL query, nothing else, no explanation, no markdown
+2. ALWAYS wrap the table name in double quotes: "{table_name}"
+3. ALWAYS wrap every column name in double quotes exactly as shown above
+4. This is critical for columns with spaces or special characters like "College Name", "Pass/Fail", "Student ID" etc.
+5. For SELECT queries, use appropriate WHERE, ORDER BY, LIMIT clauses
+6. For UPDATE queries, always include a WHERE clause
+7. For DELETE queries, always include a WHERE clause
+8. For INSERT queries, include all required columns
+9. Return ONLY the SQL query, nothing else, no explanation, no markdown
 
 SQL Query:"""
 

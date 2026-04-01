@@ -10,7 +10,8 @@ from fastapi.responses import FileResponse
 from backend.nl2sql import (
     load_file, load_postgres,
     generate_sql, execute_sql,
-    get_table_info
+    get_table_info,
+    get_sql_standalone_question
 )
 
 from backend.db import (
@@ -53,6 +54,8 @@ class ChatRequest(BaseModel):
     session_id: int
     message: str
     selected_doc: Optional[str] = "All Documents"
+    last_uploaded_doc: Optional[str] = None   # ✅ NEW: track last uploaded doc
+    session_docs: Optional[list] = []          # ✅ NEW: list of docs in session
 
 class RenameRequest(BaseModel):
     session_id: int
@@ -133,7 +136,9 @@ def chat_api(req: ChatRequest, user_id: str = Depends(get_current_user)):
     response, sources = chat(
         user_id, req.session_id,
         req.message, vectorstore,
-        selected_doc=req.selected_doc
+        selected_doc=req.selected_doc,
+        last_uploaded_doc=req.last_uploaded_doc,   # ✅ NEW
+        session_docs=req.session_docs or []         # ✅ NEW
     )
     return {"response": response, "sources": sources}
 
@@ -276,7 +281,12 @@ def query_sql(
     user_id: str = Depends(get_current_user)
 ):
     try:
-        sql_query = generate_sql(user_id, req.message)
+        # -------------------- STANDALONE QUESTION REWRITING (NL2SQL) --------------------
+        history = get_sql_history(user_id)
+        standalone_question = get_sql_standalone_question(req.message, history)
+        retrieval_query = standalone_question if standalone_question else req.message
+
+        sql_query = generate_sql(user_id, retrieval_query)
         result = execute_sql(user_id, sql_query)
 
         save_sql_message(
@@ -285,7 +295,8 @@ def query_sql(
             sql_query=sql_query,
             summary=result.get("summary", ""),
             result_type=result.get("type", ""),
-            row_count=result.get("row_count", 0)
+            row_count=result.get("row_count", 0),
+            standalone_question=standalone_question
         )
 
         return {"sql_query": sql_query, **result}

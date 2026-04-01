@@ -52,7 +52,6 @@ def create_tables():
         )
         """)
 
-        # ✅ ADDED: NL2SQL chat history table
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS sql_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +64,19 @@ def create_tables():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         """)
+
+        # -------------------- MIGRATIONS --------------------
+        # Add standalone_question to messages table if not exists
+        try:
+            cursor.execute("ALTER TABLE messages ADD COLUMN standalone_question TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+        # Add standalone_question to sql_messages table if not exists
+        try:
+            cursor.execute("ALTER TABLE sql_messages ADD COLUMN standalone_question TEXT")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
 
 # -------------------- AUTH --------------------
@@ -128,12 +140,13 @@ def get_user_sessions(user_id):
     return [{"id": r[0], "title": r[1]} for r in rows]
 
 
-def save_message(user_id, session_id, role, content):
+def save_message(user_id, session_id, role, content, standalone_question=None):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO messages (user_id, session_id, role, content) VALUES (?, ?, ?, ?)",
-            (user_id, session_id, role, content)
+            """INSERT INTO messages (user_id, session_id, role, content, standalone_question)
+            VALUES (?, ?, ?, ?, ?)""",
+            (user_id, session_id, role, content, standalone_question)
         )
 
 
@@ -162,6 +175,26 @@ def get_message_count(user_id, session_id):
         return cursor.fetchone()[0]
 
 
+def get_last_standalone_question(user_id, session_id) -> str:
+    """
+    ✅ NEW: Fetch the most recent standalone_question for a user+session
+    from the messages table (user role only).
+    Used for chaining context-dependent questions.
+    Returns empty string if none found.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT standalone_question FROM messages
+            WHERE user_id=? AND session_id=? AND role='user'
+            AND standalone_question IS NOT NULL
+            ORDER BY id DESC LIMIT 1""",
+            (user_id, session_id)
+        )
+        row = cursor.fetchone()
+    return row[0] if row else ""
+
+
 def rename_session(session_id, new_title, user_id):
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -179,24 +212,22 @@ def delete_session(session_id):
 
 
 # -------------------- NL2SQL HISTORY --------------------
-# ✅ ADDED: Save NL2SQL query to DB
-def save_sql_message(user_id, question, sql_query, summary, result_type, row_count):
+def save_sql_message(user_id, question, sql_query, summary, result_type, row_count, standalone_question=None):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """INSERT INTO sql_messages
-            (user_id, question, sql_query, summary, result_type, row_count)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (user_id, question, sql_query, summary, result_type, row_count)
+            (user_id, question, sql_query, summary, result_type, row_count, standalone_question)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, question, sql_query, summary, result_type, row_count, standalone_question)
         )
 
 
-# ✅ ADDED: Get NL2SQL history from DB
 def get_sql_history(user_id):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """SELECT question, sql_query, summary, result_type, row_count, timestamp
+            """SELECT question, sql_query, summary, result_type, row_count, timestamp, standalone_question
             FROM sql_messages WHERE user_id=?
             ORDER BY id DESC LIMIT 20""",
             (user_id,)
@@ -209,7 +240,8 @@ def get_sql_history(user_id):
             "summary": r[2],
             "result_type": r[3],
             "row_count": r[4],
-            "timestamp": r[5]
+            "timestamp": r[5],
+            "standalone_question": r[6]
         }
         for r in rows
     ]

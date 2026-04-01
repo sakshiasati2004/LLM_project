@@ -20,6 +20,7 @@ for key, default in {
     "sql_pending_query": None,
     "mic_text": "",
     "mic_listening": False,
+    "last_uploaded_doc": None,   # ✅ NEW: track last uploaded doc name
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -92,6 +93,7 @@ with tab1:
             res = requests.post(f"{API_URL}/create_chat", headers=headers)
             st.session_state.session_id = res.json()["session_id"]
             st.session_state.selected_doc = "All Documents"
+            st.session_state.last_uploaded_doc = None  # ✅ reset on new chat
             st.rerun()
 
         st.markdown("---")
@@ -129,6 +131,7 @@ with tab1:
                     if st.button(label, key=f"select_{sid}", use_container_width=True):
                         st.session_state.session_id = sid
                         st.session_state.selected_doc = "All Documents"
+                        st.session_state.last_uploaded_doc = None  # ✅ reset on session switch
                         st.rerun()
                 with col_rename:
                     if st.button("✏️", key=f"rename_{sid}"):
@@ -156,8 +159,12 @@ with tab1:
         else:
             session_docs = []
 
-        selected = st.selectbox("Filter", ["All Documents"] + session_docs)
-        st.session_state.selected_doc = selected
+        # ✅ CHANGED: removed dropdown filter, just show uploaded docs list
+        if session_docs:
+            for d in session_docs:
+                st.caption(f"• {d}")
+        else:
+            st.caption("No documents uploaded yet")
 
     # ==================== RAG MAIN ====================
     st.title("💬 RAG Chatbot")
@@ -183,14 +190,12 @@ with tab1:
             </script>
         """, unsafe_allow_html=True)
 
-        # ✅ UPDATED: added jpg, jpeg, png, ppt, pptx
         uploaded_file = st.file_uploader(
             "Upload file (PDF, TXT, DOC, DOCX, MSG, CHM, JPG, PNG, PPT, PPTX)",
             type=["pdf", "txt", "doc", "docx", "msg", "chm", "jpg", "jpeg", "png", "ppt", "pptx"]
         )
 
         if uploaded_file:
-            # ✅ UPDATED: added jpg, jpeg, png, ppt, pptx
             allowed_ext = ["pdf", "txt", "doc", "docx", "msg", "chm", "jpg", "jpeg", "png", "ppt", "pptx"]
             file_ext = uploaded_file.name.split(".")[-1].lower()
 
@@ -214,6 +219,7 @@ with tab1:
                     )
                 if res.status_code == 200:
                     st.session_state.uploaded_files[sid].add(file_key)
+                    st.session_state.last_uploaded_doc = uploaded_file.name  # ✅ NEW: track last uploaded
                     st.success("Uploaded ✅")
                     st.rerun()
                 else:
@@ -289,7 +295,9 @@ with tab1:
                             json={
                                 "session_id": st.session_state.session_id,
                                 "message": edited_text,
-                                "selected_doc": st.session_state.selected_doc
+                                "selected_doc": "All Documents",
+                                "last_uploaded_doc": st.session_state.last_uploaded_doc,  # ✅ NEW
+                                "session_docs": session_docs                               # ✅ NEW
                             }
                         )
                     if res.status_code == 200:
@@ -303,6 +311,7 @@ with tab1:
                     else:
                         st.error("⚠️ Server error. Please try again.")
                     st.session_state.mic_text = ""
+                    st.session_state.last_uploaded_doc = None  # ✅ NEW: clear after use
                     st.rerun()
 
         user_input = st.chat_input("Ask anything...")
@@ -318,7 +327,9 @@ with tab1:
                     json={
                         "session_id": st.session_state.session_id,
                         "message": user_input,
-                        "selected_doc": st.session_state.selected_doc
+                        "selected_doc": "All Documents",
+                        "last_uploaded_doc": st.session_state.last_uploaded_doc,  # ✅ NEW
+                        "session_docs": session_docs                               # ✅ NEW
                     }
                 )
 
@@ -333,6 +344,7 @@ with tab1:
             else:
                 st.error("⚠️ Server error. Please try again.")
 
+            st.session_state.last_uploaded_doc = None  # ✅ NEW: clear after first use
             st.rerun()
 
 
@@ -409,62 +421,82 @@ with tab2:
         if not st.session_state.sql_file_uploaded:
             st.info("👈 Upload a CSV, Excel, or SQLite file first")
         else:
+            # ✅ Render all past results from session_state (survives reruns)
             for result in st.session_state.sql_results:
                 with st.container():
                     with st.chat_message("user"):
                         st.write(result["question"])
 
                     with st.chat_message("assistant"):
-                        st.markdown("**🧠 Generated SQL:**")
-                        st.code(result["sql"], language="sql")
+                        if result.get("error"):
+                            st.error(f"❌ {result['error']}")
+                        else:
+                            st.markdown("**🧠 Generated SQL:**")
+                            st.code(result["sql"], language="sql")
 
-                        if result.get("summary"):
-                            st.info(f"💬 {result['summary']}")
+                            if result.get("summary"):
+                                st.info(f"💬 {result['summary']}")
 
-                        if result["type"] == "select":
-                            if result["records"]:
-                                st.markdown(f"**📊 Results ({result['row_count']} rows):**")
-                                df = pd.DataFrame(result["records"])
-                                st.dataframe(df, use_container_width=True)
+                            if result["type"] == "select":
+                                if result["records"]:
+                                    st.markdown(f"**📊 Results ({result['row_count']} rows):**")
+                                    df = pd.DataFrame(result["records"])
+                                    st.dataframe(df, use_container_width=True)
 
-                                csv = df.to_csv(index=False)
-                                st.download_button(
-                                    "⬇️ Download Results as CSV",
-                                    csv,
-                                    file_name="query_results.csv",
-                                    mime="text/csv",
-                                    key=f"download_{result['id']}"
-                                )
-                            else:
-                                st.warning("No records found matching your query.")
+                                    csv = df.to_csv(index=False)
+                                    st.download_button(
+                                        "⬇️ Download Results as CSV",
+                                        csv,
+                                        file_name="query_results.csv",
+                                        mime="text/csv",
+                                        key=f"download_{result['id']}"
+                                    )
+                                else:
+                                    st.warning("No records found matching your query.")
 
                     st.markdown("---")
 
             if st.session_state.sql_pending_query:
                 with st.chat_message("user"):
                     st.write(st.session_state.sql_pending_query)
-                with st.spinner("Generating SQL and fetching results..."):
-                    res = requests.post(
-                        f"{API_URL}/query_sql",
-                        headers=headers,
-                        json={"message": st.session_state.sql_pending_query}
-                    )
-                if res.status_code == 200:
-                    data = res.json()
-                    result_obj = {
-                        "id": len(st.session_state.sql_results),
-                        "question": st.session_state.sql_pending_query,
-                        "sql": data.get("sql_query", ""),
-                        "summary": data.get("summary", ""),
-                        "type": data.get("type", ""),
-                        "records": data.get("data", []),
-                        "columns": data.get("columns", []),
-                        "row_count": data.get("row_count", 0),
-                    }
+
+                with st.chat_message("assistant"):
+                    with st.spinner("Generating SQL and fetching results..."):
+                        res = requests.post(
+                            f"{API_URL}/query_sql",
+                            headers=headers,
+                            json={"message": st.session_state.sql_pending_query}
+                        )
+
+                    if res.status_code == 200:
+                        data = res.json()
+                        result_obj = {
+                            "id": len(st.session_state.sql_results),
+                            "question": st.session_state.sql_pending_query,
+                            "sql": data.get("sql_query", ""),
+                            "summary": data.get("summary", ""),
+                            "type": data.get("type", ""),
+                            "records": data.get("data", []),
+                            "columns": data.get("columns", []),
+                            "row_count": data.get("row_count", 0),
+                            "error": None,
+                        }
+                    else:
+                        err = res.json().get("detail", "Query failed")
+                        result_obj = {
+                            "id": len(st.session_state.sql_results),
+                            "question": st.session_state.sql_pending_query,
+                            "sql": "",
+                            "summary": "",
+                            "type": "error",
+                            "records": [],
+                            "columns": [],
+                            "row_count": 0,
+                            "error": err,
+                        }
+
                     st.session_state.sql_results.append(result_obj)
-                else:
-                    err = res.json().get("detail", "Query failed")
-                    st.error(f"❌ {err}")
+
                 st.session_state.sql_pending_query = None
                 st.rerun()
 
